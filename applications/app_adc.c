@@ -199,11 +199,12 @@ static THD_FUNCTION(adc_thread, arg) {
 			pwr = filter_val;
 		}
 
+		float brake = 0.0;
+		bool proportional_regen = false;
 		// Map the read voltage
 		switch (config.ctrl_type) {
 		case ADC_CTRL_TYPE_CURRENT_REV_CENTER:
 		case ADC_CTRL_TYPE_CURRENT_REV_BUTTON_BRAKE_CENTER:
-		case ADC_CTRL_TYPE_CURRENT_NOREV_BRAKE_CENTER:
 		case ADC_CTRL_TYPE_DUTY_REV_CENTER:
 		case ADC_CTRL_TYPE_PID_REV_CENTER:
 			// Mapping with respect to center voltage
@@ -215,7 +216,15 @@ static THD_FUNCTION(adc_thread, arg) {
 						config.voltage_end, 0.5, 1.0);
 			}
 			break;
-
+		// Use of ADC_CTRL_TYPE_CURRENT_NOREV_BRAKE_CENTER as GRIN modular regen braking power (braking power increase as voltage decrease from 0.8V to 0.0)
+		// The center value serves as the start of regen (need to be configured to 0.8V)
+		case ADC_CTRL_TYPE_CURRENT_NOREV_BRAKE_CENTER:
+			if (pwr <= config.voltage_center)  {
+				brake = utils_map(pwr, config.voltage_center, 0.0, 0.0, 1.0);
+				proportional_regen = true;
+			}
+			pwr = utils_map(pwr, config.voltage_start, config.voltage_end, 0.0, 1.0);
+			break;
 		default:
 			// Linear mapping between the start and end voltage
 			pwr = utils_map(pwr, config.voltage_start, config.voltage_end, 0.0, 1.0);
@@ -235,8 +244,6 @@ static THD_FUNCTION(adc_thread, arg) {
 		// Read the external ADC pin and convert the value to a voltage.
 #ifdef ADC_IND_EXT2
 		float brake = ADC_VOLTS(ADC_IND_EXT2);
-#else
-		float brake = 0.0;
 #endif
 
 #ifdef HW_HAS_BRAKE_OVERRIDE
@@ -259,7 +266,9 @@ static THD_FUNCTION(adc_thread, arg) {
 		}
 
 		// Map and truncate the read voltage
-		brake = utils_map(brake, config.voltage2_start, config.voltage2_end, 0.0, 1.0);
+		if (!proportional_regen) {
+			brake = utils_map(brake, config.voltage2_start, config.voltage2_end, 0.0, 1.0);
+		}
 		utils_truncate_number(&brake, 0.0, 1.0);
 
 		// Optionally invert the read voltage
@@ -329,7 +338,6 @@ static THD_FUNCTION(adc_thread, arg) {
 		switch (config.ctrl_type) {
 		case ADC_CTRL_TYPE_CURRENT_REV_CENTER:
 		case ADC_CTRL_TYPE_CURRENT_REV_BUTTON_BRAKE_CENTER:
-		case ADC_CTRL_TYPE_CURRENT_NOREV_BRAKE_CENTER:
 		case ADC_CTRL_TYPE_DUTY_REV_CENTER:
 		case ADC_CTRL_TYPE_PID_REV_CENTER:
 			// Scale the voltage and set 0 at the center
@@ -400,6 +408,9 @@ static THD_FUNCTION(adc_thread, arg) {
 		case ADC_CTRL_TYPE_CURRENT_NOREV_BRAKE_ADC:
 		case ADC_CTRL_TYPE_CURRENT_REV_BUTTON_BRAKE_ADC:
 			current_mode = true;
+			if (proportional_regen && brake > 0) {
+				pwr = -brake;
+			}
 			if (pwr >= 0.0) {
 				// if pedal assist (PAS) thread is running, use the highest current command
 				if (app_pas_is_running()) {
